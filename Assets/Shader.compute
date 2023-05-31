@@ -1,0 +1,129 @@
+#pragma kernel update
+#pragma kernel blur
+
+#define rand_max 4294967295.0
+#define rand01(state) (((float)hash(state+(int)(agent.position.y*agent.position.x*agent.angle)))/rand_max)
+#define absoloute(x) sqrt(x.r*x.r+x.y*x.y+x.z*x.z+x.w*x.w)
+float diffusion_speed;
+float evaporation_speed;
+float dt;
+float agent_speed;
+float sense_angle;
+int sense_size;
+float sense_distance;
+float turn_speed;
+float wander_strength;
+int height,width;
+
+struct Agent{
+    float angle;
+    float2 position;
+};
+
+int state;
+
+// Hash function www.cs.ubc.ca/~rbridson/docs/schechter-sca08-turbulence.pdf
+uint hash(uint state)
+{
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state;
+}
+
+
+
+
+RWStructuredBuffer<Agent> agents;
+RWTexture2D<float4> Result;
+float sense(Agent agent,float angle_offset){
+    float angle = angle_offset+agent.angle;
+    float2 direction = float2(cos(angle),sin(angle));
+    float2 pos = agent.position + direction*sense_distance*agent_speed;
+
+    if(pos.x<0 || pos.x>=width || pos.y<0 || pos.y>=height){
+        pos.x = max(0,min(width-0.01,pos.x));
+        pos.y = max(0,min(height-0.01,pos.y));
+    }
+    float avreage = 0;
+    for(int offx=-sense_size;offx<=sense_size;offx++){
+        for(int offy=-sense_size;offy<=sense_size;offy++){
+            int x_sample = (int)pos.x+offx;
+            int y_sample = (int)pos.y+offy;
+            if(!(x_sample<0 || x_sample>=width || y_sample<0 || y_sample>=height)){
+                float4 val = Result[int2(x_sample,y_sample)];
+                avreage+=absoloute(val);
+            }
+        }
+    }
+    avreage = avreage/((sense_size*2+1)*(sense_size*2+1));
+    return avreage;
+}
+
+float behaviour(Agent agent){
+    float right = sense(agent,-sense_angle);
+    float fronts = sense(agent,0);
+    float left = sense(agent,sense_angle);
+
+    if(left>right&&left>fronts){
+        return turn_speed*dt*rand01(state);
+    }
+    else if(right>left&&right>fronts){
+        return -turn_speed*dt*rand01(state);
+    }
+    else if(fronts!=0){
+        return 0;
+    }
+    else{
+        return wander_strength*(rand01(state)-0.5);
+    }
+
+}
+
+
+[numthreads(768,1,1)]
+void update (uint3 id : SV_DispatchThreadID)
+{
+    Agent agent = agents[id.x];
+    float2 direction = float2(cos(agent.angle),sin(agent.angle));
+    float2 new_pos = agent.position+direction*dt*agent_speed;
+
+    if(new_pos.x<0 || new_pos.x>=width || new_pos.y<0 || new_pos.y>=height){
+        new_pos.x = max(0,min(width,new_pos.x));
+        new_pos.y = max(0,min(height,new_pos.y));
+        agents[id.x].angle = 2*3.1415*rand01(state);
+    }
+
+    agents[id.x].position=new_pos;
+    agents[id.x].angle+=behaviour(agent);
+    Result[int2(new_pos.x,new_pos.y)]=1;
+}
+
+
+
+
+RWTexture2D<float4> bluring;
+[numthreads(32,32,1)]
+void blur (uint3 id : SV_DispatchThreadID)
+{
+    float4 old_val = bluring[id.xy];
+    float4 avreage = 0;
+    for(int offx=-1;offx<=1;offx++){
+        for(int offy=-1;offy<=1;offy++){
+            int x_sample = id.x+offx;
+            int y_sample = id.y+offy;
+            if(!(x_sample<0 || x_sample>=width || y_sample<0 || y_sample>=height)){
+                avreage+=bluring[int2(x_sample,y_sample)];
+            }
+        }
+    }
+    avreage=avreage/9;
+    float4 val = lerp(old_val,avreage,diffusion_speed*dt);
+    float4 new_val = val-evaporation_speed*dt;
+    bluring[id.xy]=max(0,new_val);
+}
+
+
